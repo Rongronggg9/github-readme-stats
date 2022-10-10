@@ -1,5 +1,4 @@
 // @ts-check
-import axios from "axios";
 import * as dotenv from "dotenv";
 import githubUsernameRegex from "github-username-regex";
 import { calculateRank } from "../calculateRank.js";
@@ -32,6 +31,7 @@ const fetcher = (variables, token) => {
           contributionsCollection {
             totalCommitContributions
             restrictedContributionsCount
+            contributionYears
           }
           repositoriesContributedTo(contributionTypes: [COMMIT, ISSUE, PULL_REQUEST, REPOSITORY]) {
             totalCount
@@ -98,6 +98,23 @@ const repositoriesFetcher = (variables, token) => {
   );
 };
 
+const fetchYearCommits = (variables, token) => {
+  return request({
+    query: `
+      query userInfo($login: String!, $from_time: DateTime!) {
+        user(login: $login) {
+          contributionsCollection(from: $from_time) {
+            totalCommitContributions
+            restrictedContributionsCount
+          }
+        }
+      }
+      `, variables,
+  }, {
+    Authorization: `bearer ${token}`,
+  },);
+};
+
 /**
  * Fetch all the commits for all the repositories of a given username.
  *
@@ -107,37 +124,39 @@ const repositoriesFetcher = (variables, token) => {
  * @description Done like this because the Github API does not provide a way to fetch all the commits. See
  * #92#issuecomment-661026467 and #211 for more information.
  */
-const totalCommitsFetcher = async (username) => {
+const totalCommitsFetcher = async (username, contributionYears) => {
   if (!githubUsernameRegex.test(username)) {
     logger.log("Invalid username");
     return 0;
   }
 
-  // https://developer.github.com/v3/search/#search-commits
-  const fetchTotalCommits = (variables, token) => {
-    return axios({
-      method: "get",
-      url: `https://api.github.com/search/commits?q=author:${variables.login}`,
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/vnd.github.cloak-preview",
-        Authorization: `token ${token}`,
-      },
-    });
-  };
+  let totalPublicCommits = 0;
+  let totalPrivateCommits = 0;
 
   try {
-    let res = await retryer(fetchTotalCommits, { login: username });
-    let total_count = res.data.total_count;
-    if (!!total_count && !isNaN(total_count)) {
-      return res.data.total_count;
-    }
+    await Promise.all(contributionYears.map(async (year) => {
+          let variables = {
+            login: username,
+            from_time: `${year}-01-01T00:00:00.000Z`,
+          };
+          let res = await retryer(fetchYearCommits, variables);
+          totalPublicCommits += res.data.data.user.contributionsCollection.totalCommitContributions;
+          totalPrivateCommits += res.data.data.user.contributionsCollection.restrictedContributionsCount;
+        })
+    );
+    return {
+      totalPublicCommits,
+      totalPrivateCommits,
+    };
   } catch (err) {
     logger.log(err);
   }
   // just return 0 if there is something wrong so that
   // we don't break the whole app
-  return 0;
+  return {
+      totalPublicCommits: 0,
+      totalPrivateCommits: 0,
+    };
 };
 
 /**
@@ -246,16 +265,19 @@ async function fetchStats(
   // normal commits
   stats.totalCommits = user.contributionsCollection.totalCommitContributions;
 
+  let privateCommits = user.contributionsCollection.restrictedContributionsCount;
+
   // if include_all_commits then just get that,
   // since totalCommitsFetcher already sends totalCommits no need to +=
   if (include_all_commits) {
-    stats.totalCommits = await totalCommitsFetcher(username);
+    const { totalPublicCommits, totalPrivateCommits } = await totalCommitsFetcher(username, user.contributionsCollection.contributionYears);
+    stats.totalCommits = totalPublicCommits;
+    privateCommits = totalPrivateCommits;
   }
 
   // if count_private then add private commits to totalCommits so far.
   if (count_private) {
-    stats.totalCommits +=
-      user.contributionsCollection.restrictedContributionsCount;
+    stats.totalCommits += privateCommits;
   }
 
   stats.totalPRs = user.pullRequests.totalCount;
