@@ -99,8 +99,9 @@ const repositoriesFetcher = (variables, token) => {
 };
 
 const fetchYearCommits = (variables, token) => {
-  return request({
-    query: `
+  return request(
+    {
+      query: `
       query userInfo($login: String!, $from_time: DateTime!) {
         user(login: $login) {
           contributionsCollection(from: $from_time) {
@@ -109,54 +110,56 @@ const fetchYearCommits = (variables, token) => {
           }
         }
       }
-      `, variables,
-  }, {
-    Authorization: `bearer ${token}`,
-  },);
+      `,
+      variables,
+    },
+    {
+      Authorization: `bearer ${token}`,
+    },
+  );
 };
 
 /**
  * Fetch all the commits for all the repositories of a given username.
  *
  * @param {*} username Github username.
- * @returns {Promise<number>} Total commits.
+ * @param {number[]} contributionYears Array of years for which to fetch commits.
+ * @returns {Promise<{totalPublicCommits: number, totalPrivateCommits: number}>} Total commits.
  *
  * @description Done like this because the Github API does not provide a way to fetch all the commits. See
  * #92#issuecomment-661026467 and #211 for more information.
  */
 const totalCommitsFetcher = async (username, contributionYears) => {
-  if (!githubUsernameRegex.test(username)) {
-    logger.log("Invalid username");
-    return 0;
-  }
+  if (!githubUsernameRegex.test(username))
+    throw new CustomError("Invalid username");
 
   let totalPublicCommits = 0;
   let totalPrivateCommits = 0;
 
-  try {
-    await Promise.all(contributionYears.map(async (year) => {
-          let variables = {
-            login: username,
-            from_time: `${year}-01-01T00:00:00.000Z`,
-          };
-          let res = await retryer(fetchYearCommits, variables);
-          totalPublicCommits += res.data.data.user.contributionsCollection.totalCommitContributions;
-          totalPrivateCommits += res.data.data.user.contributionsCollection.restrictedContributionsCount;
-        })
-    );
-    return {
-      totalPublicCommits,
-      totalPrivateCommits,
-    };
-  } catch (err) {
-    logger.log(err);
-  }
-  // just return 0 if there is something wrong so that
-  // we don't break the whole app
+  await Promise.all(
+    contributionYears.map(async (year) => {
+      const variables = {
+        login: username,
+        from_time: `${year}-01-01T00:00:00.000Z`,
+      };
+      const res = await retryer(fetchYearCommits, variables);
+      if (res.data.errors) {
+        logger.error(res.data.errors);
+        throw new CustomError(
+          "Something went while trying to retrieve the stats data using the GraphQL API.",
+          CustomError.GRAPHQL_ERROR,
+        );
+      }
+      totalPublicCommits +=
+        res.data.data.user.contributionsCollection.totalCommitContributions;
+      totalPrivateCommits +=
+        res.data.data.user.contributionsCollection.restrictedContributionsCount;
+    }),
+  );
   return {
-      totalPublicCommits: 0,
-      totalPrivateCommits: 0,
-    };
+    totalPublicCommits,
+    totalPrivateCommits,
+  };
 };
 
 /**
@@ -265,12 +268,17 @@ async function fetchStats(
   // normal commits
   stats.totalCommits = user.contributionsCollection.totalCommitContributions;
 
-  let privateCommits = user.contributionsCollection.restrictedContributionsCount;
+  let privateCommits =
+    user.contributionsCollection.restrictedContributionsCount;
 
   // if include_all_commits then just get that,
   // since totalCommitsFetcher already sends totalCommits no need to +=
   if (include_all_commits) {
-    const { totalPublicCommits, totalPrivateCommits } = await totalCommitsFetcher(username, user.contributionsCollection.contributionYears);
+    const { totalPublicCommits, totalPrivateCommits } =
+      await totalCommitsFetcher(
+        username,
+        user.contributionsCollection.contributionYears,
+      );
     stats.totalCommits = totalPublicCommits;
     privateCommits = totalPrivateCommits;
   }
